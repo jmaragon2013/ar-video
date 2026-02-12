@@ -57,25 +57,31 @@
       device-orientation-permission-ui="enabled: false"
     >
       <a-assets>
-        <video
-          id="parejaVideo"
-          src="assets/vp9.webm"
-          preload="auto"
-          playsinline
-          webkit-playsinline
-          muted
-          disablePictureInPicture
-          crossorigin="anonymous"
-        ></video>
+  <video
+    id="parejaVideo"
+    preload="auto"
+    playsinline
+    webkit-playsinline
+    muted
+    disablePictureInPicture
+    crossorigin="anonymous"
+  >
+    <!-- Preferencia: VP9 -->
+    <source src="assets/vp9.webm" type='video/webm; codecs="vp9"' />
+    <!-- Alternativa rápida: VP8 -->
+    <source src="assets/vp8.webm" type='video/webm; codecs="vp8"' />
+    <!-- Safari: HEVC -->
+    <source src="assets/video.mp4" type='video/mp4; codecs="hvc1"' />
+  </video>
 
-        <!-- Audio separado para estabilidad A/V -->
-        <audio
-          id="parejaAudio"
-          src="assets/ra_bueno.opus"
-          preload="auto"
-          crossorigin="anonymous"
-        ></audio>
-      </a-assets>
+  <!-- Audio separado para estabilidad A/V -->
+  <audio
+    id="parejaAudio"
+    src="assets/ra_bueno.opus"
+    preload="auto"
+    crossorigin="anonymous"
+  ></audio>
+</a-assets>
 
       <a-camera id="camera" position="0 0 0" look-controls="enabled: false"></a-camera>
 
