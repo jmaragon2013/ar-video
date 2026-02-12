@@ -56,10 +56,10 @@
       vr-mode-ui="enabled: false"
       device-orientation-permission-ui="enabled: false"
     >
-      <a-assets>
+    <a-assets>
   <video
     id="parejaVideo"
-    preload="auto"
+    preload="metadata"
     playsinline
     webkit-playsinline
     muted
@@ -74,13 +74,16 @@
     <source src="assets/video.mp4" type='video/mp4; codecs="hvc1"' />
   </video>
 
-  <!-- Audio separado para estabilidad A/V -->
+  <!-- Audio separado para estabilidad A/V + fallback para Safari -->
   <audio
     id="parejaAudio"
-    src="assets/ra_bueno.opus"
-    preload="auto"
+    preload="metadata"
     crossorigin="anonymous"
-  ></audio>
+  >
+    <source src="assets/ra_bueno.opus" type='audio/ogg; codecs="opus"' />
+    <!-- Añade este archivo para mejorar compatibilidad -->
+    <source src="assets/ra_bueno.m4a" type='audio/mp4; codecs="mp4a.40.2"' />
+  </audio>
 </a-assets>
 
       <a-camera id="camera" position="0 0 0" look-controls="enabled: false"></a-camera>
@@ -114,21 +117,22 @@
     const htmlBtn = document.getElementById('invitation-button');
     const playBtn = document.getElementById('play-button');
     const videoEl = document.getElementById('parejaVideo');
-    const audioEl = document.getElementById('parejaAudio'); 
+    const audioEl = document.getElementById('parejaAudio');
     const overlayVideoEl = document.getElementById('overlayVideo');
 
-    // Diagnóstico rápido
-    if (videoEl) {
-      videoEl.addEventListener('error', () => console.warn('Video error:', videoEl.error));
-    }
-    if (audioEl) {
-      audioEl.addEventListener('error', () => console.warn('Audio error:', audioEl.error));
-    }
+    let isTargetVisible = false;
+    let syncing = false;
+    let syncTimer = null;
 
-        // "Cover": rellena el plano recortando (elimina bandas laterales/superiores)
+    // Nuevo: estado para reanudar sin reiniciar
+    let hasUserStarted = false;
+    let wasPlayingBeforeLost = false;
+
+    if (videoEl) videoEl.addEventListener('error', () => console.warn('Video error:', videoEl.error));
+    if (audioEl) audioEl.addEventListener('error', () => console.warn('Audio error:', audioEl.error));
+
     const applyVideoCover = () => {
       if (!overlayVideoEl || !videoEl) return;
-
       const vw = videoEl.videoWidth;
       const vh = videoEl.videoHeight;
       if (!vw || !vh) return;
@@ -140,15 +144,10 @@
       const targetAspect = targetW / targetH;
 
       let repeatX = 1, repeatY = 1;
+      if (videoAspect > targetAspect) repeatX = targetAspect / videoAspect;
+      else repeatY = videoAspect / targetAspect;
 
-      if (videoAspect > targetAspect) {
-        repeatX = targetAspect / videoAspect; // < 1 => crop en X
-      } else {
-        repeatY = videoAspect / targetAspect; // < 1 => crop en Y
-      }
-
-      // ✅ Reduce el recorte un 10% (acerca repeat a 1.0)
-      const reduceCrop = 0.75; // 0.9 => 10% menos recorte; 0.8 => 20% menos, etc.
+      const reduceCrop = 0.75;
       repeatX = 1 - (1 - repeatX) * reduceCrop;
       repeatY = 1 - (1 - repeatY) * reduceCrop;
 
@@ -159,150 +158,176 @@
       overlayVideoEl.setAttribute('material', 'offset', `${offsetX} ${offsetY}`);
     };
 
-        if (videoEl) {
-          if (videoEl.readyState >= 1) applyVideoCover();
-          videoEl.addEventListener('loadedmetadata', applyVideoCover);
-        }
+    if (videoEl) {
+      if (videoEl.readyState >= 1) applyVideoCover();
+      videoEl.addEventListener('loadedmetadata', applyVideoCover);
+      videoEl.addEventListener('loadedmetadata', () => {
+        // Útil para verificar qué source se eligió realmente
+        console.log('Video currentSrc:', videoEl.currentSrc);
+      });
+    }
 
-        let isTargetVisible = false;
-        let syncing = false;
-        let syncTimer = null;
-
-        // Clamp pixelRatio (muy efectivo en móviles con AR + vídeo)
-        if (sceneEl) {
-          sceneEl.addEventListener('loaded', () => {
-            if (sceneEl.renderer) {
-              sceneEl.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-            }
-          });
-        }
-
-        const stopAll = () => {
-          syncing = false;
-          if (syncTimer) {
-            clearInterval(syncTimer);
-            syncTimer = null;
-          }
-          if (audioEl) {
-            audioEl.pause();
-          }
-          if (videoEl) {
-            videoEl.pause();
-          }
-        };
-
-        const startSyncLoop = () => {
-          if (!videoEl || !audioEl) return;
-          syncing = true;
-
-          // requestVideoFrameCallback (mejor) + fallback setInterval
-          if (typeof videoEl.requestVideoFrameCallback === 'function') {
-            const onFrame = () => {
-              if (!syncing) return;
-              if (!audioEl.paused && !videoEl.paused) {
-                const drift = audioEl.currentTime - videoEl.currentTime;
-                if (Math.abs(drift) > 0.08) {
-                  // Pequeña corrección: audio sigue al vídeo-textura
-                  audioEl.currentTime = videoEl.currentTime;
-                }
-              }
-              videoEl.requestVideoFrameCallback(onFrame);
-            };
-            videoEl.requestVideoFrameCallback(onFrame);
-          } else {
-            syncTimer = setInterval(() => {
-              if (!syncing) return;
-              if (!audioEl.paused && !videoEl.paused) {
-                const drift = audioEl.currentTime - videoEl.currentTime;
-                if (Math.abs(drift) > 0.12) audioEl.currentTime = videoEl.currentTime;
-              }
-            }, 250);
-          }
-        };
-
-        // Target found/lost: pausar para ahorrar CPU/GPU
-        if (target) {
-          target.setAttribute('visible', 'false');
-
-          target.addEventListener('targetFound', async function () {
-            isTargetVisible = true;
-            target.setAttribute('visible', 'true');
-
-            // Priming: intenta arrancar muted para calentar decoder (no crítico si falla)
-            try {
-              videoEl.muted = true;
-              await videoEl.play();
-              videoEl.pause();
-              videoEl.currentTime = 0;
-            } catch (_) {
-              // Puede fallar según políticas; se ignora
-            }
-
-            if (playBtn) playBtn.style.display = 'inline-flex';
-          });
-
-          target.addEventListener('targetLost', function () {
-            isTargetVisible = false;
-            target.setAttribute('visible', 'false');
-            if (playBtn) playBtn.style.display = 'none';
-            stopAll();
-            if (videoEl) videoEl.currentTime = 0;
-            if (audioEl) audioEl.currentTime = 0;
-          });
-        }
-
-        // Botón HTML (igual que antes)
-        if (htmlBtn) {
-          htmlBtn.classList.add('hidden');
-          if (target) {
-            target.addEventListener('targetFound', function () { htmlBtn.classList.remove('hidden'); });
-            target.addEventListener('targetLost', function () { htmlBtn.classList.add('hidden'); });
-          } else {
-            htmlBtn.classList.remove('hidden');
-          }
-
-          htmlBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            const win = window.open(htmlBtn.getAttribute('href'), '_blank');
-            if (!win) window.location.href = htmlBtn.getAttribute('href');
-          });
-        }
-
-        // Click: arranca vídeo (muted) + audio separado y sincroniza
-        if (playBtn && videoEl && audioEl) {
-          playBtn.style.display = 'none';
-
-          playBtn.addEventListener('click', async () => {
-            try {
-              videoEl.loop = false;
-              videoEl.currentTime = 0;
-              videoEl.muted = true;
-
-              audioEl.currentTime = 0;
-              audioEl.loop = false;
-
-              // Arranca ambos lo más juntos posible
-              await videoEl.play();
-              await audioEl.play();
-
-              startSyncLoop();
-              playBtn.style.display = 'none';
-            } catch (err) {
-              console.warn('No se pudo iniciar reproducción:', err);
-            }
-          });
-
-          const onEnded = () => {
-            stopAll();
-            videoEl.currentTime = 0;
-            audioEl.currentTime = 0;
-            if (isTargetVisible) playBtn.style.display = 'inline-flex';
-          };
-
-          videoEl.addEventListener('ended', onEnded);
-          audioEl.addEventListener('ended', onEnded);
+    if (sceneEl) {
+      sceneEl.addEventListener('loaded', () => {
+        if (sceneEl.renderer) {
+          sceneEl.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
         }
       });
-    </script>
+    }
+
+    const stopAll = () => {
+      syncing = false;
+      if (syncTimer) {
+        clearInterval(syncTimer);
+        syncTimer = null;
+      }
+      if (audioEl) audioEl.pause();
+      if (videoEl) videoEl.pause();
+    };
+
+    const startSyncLoop = () => {
+      if (!videoEl || !audioEl) return;
+      syncing = true;
+
+      // Audio sigue al vídeo (lo que se ve manda)
+      if (typeof videoEl.requestVideoFrameCallback === 'function') {
+        const onFrame = () => {
+          if (!syncing) return;
+          if (!audioEl.paused && !videoEl.paused) {
+            const drift = audioEl.currentTime - videoEl.currentTime;
+            if (Math.abs(drift) > 0.08) audioEl.currentTime = videoEl.currentTime;
+          }
+          videoEl.requestVideoFrameCallback(onFrame);
+        };
+        videoEl.requestVideoFrameCallback(onFrame);
+      } else {
+        syncTimer = setInterval(() => {
+          if (!syncing) return;
+          if (!audioEl.paused && !videoEl.paused) {
+            const drift = audioEl.currentTime - videoEl.currentTime;
+            if (Math.abs(drift) > 0.12) audioEl.currentTime = videoEl.currentTime;
+          }
+        }, 250);
+      }
+    };
+
+    const tryResume = async () => {
+      if (!videoEl || !audioEl) return false;
+      try {
+        videoEl.muted = true; // siempre muted: el audio va separado
+        // Mantener tiempos (no reiniciar)
+        audioEl.currentTime = videoEl.currentTime;
+
+        await videoEl.play();
+        await audioEl.play();
+
+        startSyncLoop();
+        return true;
+      } catch (err) {
+        console.warn('No se pudo reanudar:', err);
+        return false;
+      }
+    };
+
+    if (target) {
+      target.setAttribute('visible', 'false');
+
+      target.addEventListener('targetFound', async function () {
+        isTargetVisible = true;
+        target.setAttribute('visible', 'true');
+
+        // Priming SOLO antes del primer inicio del usuario, sin resetear currentTime
+        if (!hasUserStarted) {
+          try {
+            videoEl.muted = true;
+            await videoEl.play();
+            videoEl.pause();
+          } catch (_) {}
+        }
+
+        // Si ya había empezado y se estaba reproduciendo antes de perder el target, reanudar
+        if (hasUserStarted && wasPlayingBeforeLost) {
+          const ok = await tryResume();
+          if (playBtn) playBtn.style.display = ok ? 'none' : 'inline-flex';
+        } else {
+          if (playBtn) playBtn.style.display = 'inline-flex';
+        }
+      });
+
+      target.addEventListener('targetLost', function () {
+        isTargetVisible = false;
+        target.setAttribute('visible', 'false');
+
+        // Guardar si estaba reproduciendo para reanudar luego
+        wasPlayingBeforeLost = !!(hasUserStarted && videoEl && audioEl && (!videoEl.paused || !audioEl.paused));
+
+        if (playBtn) playBtn.style.display = 'none';
+        stopAll();
+
+        // Importante: NO reiniciar tiempos
+        // (se reanudará desde donde se quedó)
+      });
+    }
+
+    if (htmlBtn) {
+      htmlBtn.classList.add('hidden');
+      if (target) {
+        target.addEventListener('targetFound', function () { htmlBtn.classList.remove('hidden'); });
+        target.addEventListener('targetLost', function () { htmlBtn.classList.add('hidden'); });
+      } else {
+        htmlBtn.classList.remove('hidden');
+      }
+
+      htmlBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        const win = window.open(htmlBtn.getAttribute('href'), '_blank');
+        if (!win) window.location.href = htmlBtn.getAttribute('href');
+      });
+    }
+
+    if (playBtn && videoEl && audioEl) {
+      playBtn.style.display = 'none';
+
+      playBtn.addEventListener('click', async () => {
+        try {
+          hasUserStarted = true;
+          wasPlayingBeforeLost = true;
+
+          videoEl.loop = false;
+          videoEl.muted = true;
+
+          audioEl.loop = false;
+
+          // Si es la primera vez, empezar desde 0. Si no, reanudar desde el tiempo actual.
+          if (videoEl.ended || audioEl.ended) {
+            videoEl.currentTime = 0;
+            audioEl.currentTime = 0;
+          } else {
+            audioEl.currentTime = videoEl.currentTime;
+          }
+
+          await videoEl.play();
+          await audioEl.play();
+
+          startSyncLoop();
+          playBtn.style.display = 'none';
+        } catch (err) {
+          console.warn('No se pudo iniciar reproducción:', err);
+        }
+      });
+
+      const onEnded = () => {
+        stopAll();
+        wasPlayingBeforeLost = false;
+        videoEl.currentTime = 0;
+        audioEl.currentTime = 0;
+        if (isTargetVisible) playBtn.style.display = 'inline-flex';
+      };
+
+      videoEl.addEventListener('ended', onEnded);
+      audioEl.addEventListener('ended', onEnded);
+    }
+  });
+</script>
   </body>
 </html>
