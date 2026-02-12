@@ -1,0 +1,302 @@
+<!doctype html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+    <style>
+      #invitation-button {
+        position: fixed;
+        right: 120px;
+        bottom: 120px;
+        z-index: 1001;
+        background: #312731;
+        color: #ECDFEE;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-weight: 600;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        -webkit-tap-highlight-color: transparent;
+      }
+      #invitation-button.hidden { display: none; }
+      #invitation-button:active { transform: translateY(1px); }
+
+      #play-button {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        z-index: 1002;
+        background: #312731;
+        color: #ECDFEE;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        -webkit-tap-highlight-color: transparent;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      #play-button:active { transform: translateY(1px); }
+    </style>
+  </head>
+
+  <body>
+    <a-scene
+      mindar-image="imageTargetSrc: assets/targets.mind; filterMinCF:0.0001; filterBeta: 0.001;"
+      color-space="sRGB"
+      renderer="colorManagement: true; antialias: false; precision: mediump"
+      vr-mode-ui="enabled: false"
+      device-orientation-permission-ui="enabled: false"
+    >
+      <a-assets>
+        <video
+          id="parejaVideo"
+          src="assets/vp9.webm"
+          preload="auto"
+          playsinline
+          webkit-playsinline
+          muted
+          disablePictureInPicture
+          crossorigin="anonymous"
+        ></video>
+
+        <!-- Audio separado para estabilidad A/V -->
+        <audio
+          id="parejaAudio"
+          src="assets/ra_bueno.opus"
+          preload="auto"
+          crossorigin="anonymous"
+        ></audio>
+      </a-assets>
+
+      <a-camera id="camera" position="0 0 0" look-controls="enabled: false"></a-camera>
+
+      <a-entity mindar-image-target="targetIndex: 0" id="targetEntity">
+        <a-video
+          id="overlayVideo"
+          src="#parejaVideo"
+          position="0 0.9 0"
+          height="1"
+          width="1"
+          rotation="0 0 0"
+          material="shader: flat; transparent: true; alphaTest: 0.02"
+        ></a-video>
+      </a-entity>
+    </a-scene>
+
+    <a id="invitation-button" class="hidden" href="https://sample.lunarie.es" target="_blank" rel="noopener noreferrer" aria-label="Invitación digital">
+      Invitación digital
+    </a>
+
+    <button id="play-button" aria-label="Iniciar vídeo" title="Iniciar vídeo" type="button">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 3v18l15-9L5 3z" fill="currentColor"/></svg>
+      Reproducir
+    </button>
+
+    <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const sceneEl = document.querySelector('a-scene');
+    const target = document.getElementById('targetEntity');
+    const htmlBtn = document.getElementById('invitation-button');
+    const playBtn = document.getElementById('play-button');
+    const videoEl = document.getElementById('parejaVideo');
+    const audioEl = document.getElementById('parejaAudio'); 
+    const overlayVideoEl = document.getElementById('overlayVideo');
+
+    // Diagnóstico rápido
+    if (videoEl) {
+      videoEl.addEventListener('error', () => console.warn('Video error:', videoEl.error));
+    }
+    if (audioEl) {
+      audioEl.addEventListener('error', () => console.warn('Audio error:', audioEl.error));
+    }
+
+        // "Cover": rellena el plano recortando (elimina bandas laterales/superiores)
+    const applyVideoCover = () => {
+      if (!overlayVideoEl || !videoEl) return;
+
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      if (!vw || !vh) return;
+
+      const targetW = parseFloat(overlayVideoEl.getAttribute('width')) || 1;
+      const targetH = parseFloat(overlayVideoEl.getAttribute('height')) || 1;
+
+      const videoAspect = vw / vh;
+      const targetAspect = targetW / targetH;
+
+      let repeatX = 1, repeatY = 1;
+
+      if (videoAspect > targetAspect) {
+        repeatX = targetAspect / videoAspect; // < 1 => crop en X
+      } else {
+        repeatY = videoAspect / targetAspect; // < 1 => crop en Y
+      }
+
+      // ✅ Reduce el recorte un 10% (acerca repeat a 1.0)
+      const reduceCrop = 0.75; // 0.9 => 10% menos recorte; 0.8 => 20% menos, etc.
+      repeatX = 1 - (1 - repeatX) * reduceCrop;
+      repeatY = 1 - (1 - repeatY) * reduceCrop;
+
+      const offsetX = (1 - repeatX) / 2;
+      const offsetY = (1 - repeatY) / 2;
+
+      overlayVideoEl.setAttribute('material', 'repeat', `${repeatX} ${repeatY}`);
+      overlayVideoEl.setAttribute('material', 'offset', `${offsetX} ${offsetY}`);
+    };
+
+        if (videoEl) {
+          if (videoEl.readyState >= 1) applyVideoCover();
+          videoEl.addEventListener('loadedmetadata', applyVideoCover);
+        }
+
+        let isTargetVisible = false;
+        let syncing = false;
+        let syncTimer = null;
+
+        // Clamp pixelRatio (muy efectivo en móviles con AR + vídeo)
+        if (sceneEl) {
+          sceneEl.addEventListener('loaded', () => {
+            if (sceneEl.renderer) {
+              sceneEl.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+            }
+          });
+        }
+
+        const stopAll = () => {
+          syncing = false;
+          if (syncTimer) {
+            clearInterval(syncTimer);
+            syncTimer = null;
+          }
+          if (audioEl) {
+            audioEl.pause();
+          }
+          if (videoEl) {
+            videoEl.pause();
+          }
+        };
+
+        const startSyncLoop = () => {
+          if (!videoEl || !audioEl) return;
+          syncing = true;
+
+          // requestVideoFrameCallback (mejor) + fallback setInterval
+          if (typeof videoEl.requestVideoFrameCallback === 'function') {
+            const onFrame = () => {
+              if (!syncing) return;
+              if (!audioEl.paused && !videoEl.paused) {
+                const drift = audioEl.currentTime - videoEl.currentTime;
+                if (Math.abs(drift) > 0.08) {
+                  // Pequeña corrección: audio sigue al vídeo-textura
+                  audioEl.currentTime = videoEl.currentTime;
+                }
+              }
+              videoEl.requestVideoFrameCallback(onFrame);
+            };
+            videoEl.requestVideoFrameCallback(onFrame);
+          } else {
+            syncTimer = setInterval(() => {
+              if (!syncing) return;
+              if (!audioEl.paused && !videoEl.paused) {
+                const drift = audioEl.currentTime - videoEl.currentTime;
+                if (Math.abs(drift) > 0.12) audioEl.currentTime = videoEl.currentTime;
+              }
+            }, 250);
+          }
+        };
+
+        // Target found/lost: pausar para ahorrar CPU/GPU
+        if (target) {
+          target.setAttribute('visible', 'false');
+
+          target.addEventListener('targetFound', async function () {
+            isTargetVisible = true;
+            target.setAttribute('visible', 'true');
+
+            // Priming: intenta arrancar muted para calentar decoder (no crítico si falla)
+            try {
+              videoEl.muted = true;
+              await videoEl.play();
+              videoEl.pause();
+              videoEl.currentTime = 0;
+            } catch (_) {
+              // Puede fallar según políticas; se ignora
+            }
+
+            if (playBtn) playBtn.style.display = 'inline-flex';
+          });
+
+          target.addEventListener('targetLost', function () {
+            isTargetVisible = false;
+            target.setAttribute('visible', 'false');
+            if (playBtn) playBtn.style.display = 'none';
+            stopAll();
+            if (videoEl) videoEl.currentTime = 0;
+            if (audioEl) audioEl.currentTime = 0;
+          });
+        }
+
+        // Botón HTML (igual que antes)
+        if (htmlBtn) {
+          htmlBtn.classList.add('hidden');
+          if (target) {
+            target.addEventListener('targetFound', function () { htmlBtn.classList.remove('hidden'); });
+            target.addEventListener('targetLost', function () { htmlBtn.classList.add('hidden'); });
+          } else {
+            htmlBtn.classList.remove('hidden');
+          }
+
+          htmlBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            const win = window.open(htmlBtn.getAttribute('href'), '_blank');
+            if (!win) window.location.href = htmlBtn.getAttribute('href');
+          });
+        }
+
+        // Click: arranca vídeo (muted) + audio separado y sincroniza
+        if (playBtn && videoEl && audioEl) {
+          playBtn.style.display = 'none';
+
+          playBtn.addEventListener('click', async () => {
+            try {
+              videoEl.loop = false;
+              videoEl.currentTime = 0;
+              videoEl.muted = true;
+
+              audioEl.currentTime = 0;
+              audioEl.loop = false;
+
+              // Arranca ambos lo más juntos posible
+              await videoEl.play();
+              await audioEl.play();
+
+              startSyncLoop();
+              playBtn.style.display = 'none';
+            } catch (err) {
+              console.warn('No se pudo iniciar reproducción:', err);
+            }
+          });
+
+          const onEnded = () => {
+            stopAll();
+            videoEl.currentTime = 0;
+            audioEl.currentTime = 0;
+            if (isTargetVisible) playBtn.style.display = 'inline-flex';
+          };
+
+          videoEl.addEventListener('ended', onEnded);
+          audioEl.addEventListener('ended', onEnded);
+        }
+      });
+    </script>
+  </body>
+</html>
